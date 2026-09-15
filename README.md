@@ -45,6 +45,17 @@ $ cat MyFont.otf | fontmetrics -
 With no argument, or `-` as the argument, input is read from stdin. With a
 path argument, that file is read instead.
 
+Add `--json` to get the same metrics as a single JSON object instead, for
+piping into `jq` or another script:
+
+```
+$ fontmetrics --json Georgia.ttf
+{"units_per_em":2048,"hhea":{"ascent":1878,"descent":-449,"line_gap":0},"os2_typo":{"ascent":1419,"descent":-397,"line_gap":200},"os2_win":{"ascent":1878,"descent":449},"cap_height":1466,"x_height":1000,"italic_angle":0.00}
+```
+
+Fields the font doesn't provide come back as `null` rather than being
+omitted, so the shape is the same for every font.
+
 ## Building
 
 Standard library only, no dependencies:

@@ -14,6 +14,18 @@ struct Table {
     length: u32,
 }
 
+// Everything report() might find, kept separate from formatting so the
+// same parse can feed either the human-readable or --json renderer.
+#[derive(Default)]
+struct Metrics {
+    units_per_em: u16,
+    hhea: Option<(i16, i16, i16)>,
+    os2_typo: Option<(i16, i16, i16)>,
+    os2_win: Option<(u16, u16)>,
+    cap_x_height: Option<(i16, i16)>,
+    italic_angle: Option<f64>,
+}
+
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
 
@@ -21,12 +33,21 @@ fn main() {
         print_usage();
         return;
     }
-    if args.len() > 1 {
-        print_usage();
-        process::exit(2);
+
+    let mut json = false;
+    let mut path: Option<&str> = None;
+    for a in &args {
+        if a == "--json" {
+            json = true;
+        } else if path.is_none() {
+            path = Some(a);
+        } else {
+            print_usage();
+            process::exit(2);
+        }
     }
 
-    let data = match args.first().map(|s| s.as_str()) {
+    let data = match path {
         None | Some("-") => read_stdin(),
         Some(path) => fs::read(path).map_err(|e| format!("{path}: {e}")),
     };
@@ -40,7 +61,13 @@ fn main() {
     };
 
     match report(&data) {
-        Ok(text) => print!("{text}"),
+        Ok(metrics) => {
+            if json {
+                println!("{}", render_json(&metrics));
+            } else {
+                print!("{}", render_text(&metrics));
+            }
+        }
         Err(e) => {
             eprintln!("fontmetrics: {e}");
             process::exit(1);
@@ -49,10 +76,11 @@ fn main() {
 }
 
 fn print_usage() {
-    eprintln!("usage: fontmetrics [FILE]");
+    eprintln!("usage: fontmetrics [--json] [FILE]");
     eprintln!();
     eprintln!("Print font metrics from a TrueType or OpenType file.");
     eprintln!("With no FILE, or FILE is -, read from standard input.");
+    eprintln!("With --json, print the metrics as a single JSON object.");
 }
 
 fn read_stdin() -> Result<Vec<u8>, String> {
@@ -63,7 +91,7 @@ fn read_stdin() -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
-fn report(data: &[u8]) -> Result<String, String> {
+fn report(data: &[u8]) -> Result<Metrics, String> {
     let tag = u32_at(data, 0)?;
     if tag == 0x74746366 {
         // 'ttcf'
@@ -71,12 +99,10 @@ fn report(data: &[u8]) -> Result<String, String> {
     }
 
     let tables = read_table_directory(data)?;
-    let mut out = String::new();
+    let mut metrics = Metrics::default();
 
-    let units_per_em = if let Some(head) = find(&tables, b"head") {
-        let upm = u16_at(data, head.offset as usize + 18)?;
-        out.push_str(&format!("units per em     : {upm}\n"));
-        upm
+    metrics.units_per_em = if let Some(head) = find(&tables, b"head") {
+        u16_at(data, head.offset as usize + 18)?
     } else {
         return Err("no 'head' table found; not a valid sfnt font".to_string());
     };
@@ -86,9 +112,7 @@ fn report(data: &[u8]) -> Result<String, String> {
         let ascender = i16_at(data, off + 4)?;
         let descender = i16_at(data, off + 6)?;
         let line_gap = i16_at(data, off + 8)?;
-        out.push_str(&format!(
-            "hhea ascent/descent/gap : {ascender} / {descender} / {line_gap}\n"
-        ));
+        metrics.hhea = Some((ascender, descender, line_gap));
     }
 
     if let Some(os2) = find(&tables, b"OS/2") {
@@ -99,28 +123,81 @@ fn report(data: &[u8]) -> Result<String, String> {
         let typo_line_gap = i16_at(data, off + 72)?;
         let win_ascent = u16_at(data, off + 74)?;
         let win_descent = u16_at(data, off + 76)?;
-        out.push_str(&format!(
-            "OS/2 typo asc/desc/gap  : {typo_ascender} / {typo_descender} / {typo_line_gap}\n"
-        ));
-        out.push_str(&format!(
-            "OS/2 win ascent/descent : {win_ascent} / {win_descent}\n"
-        ));
+        metrics.os2_typo = Some((typo_ascender, typo_descender, typo_line_gap));
+        metrics.os2_win = Some((win_ascent, win_descent));
 
         if version >= 2 && os2.length >= 96 {
             let x_height = i16_at(data, off + 86)?;
             let cap_height = i16_at(data, off + 88)?;
-            out.push_str(&format!("x-height / cap-height   : {x_height} / {cap_height}\n"));
+            metrics.cap_x_height = Some((cap_height, x_height));
         }
     }
 
     if let Some(post) = find(&tables, b"post") {
         let off = post.offset as usize;
-        let italic_angle = fixed_at(data, off + 4)?;
+        metrics.italic_angle = Some(fixed_at(data, off + 4)?);
+    }
+
+    Ok(metrics)
+}
+
+fn render_text(m: &Metrics) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("units per em     : {}\n", m.units_per_em));
+
+    if let Some((ascender, descender, line_gap)) = m.hhea {
+        out.push_str(&format!(
+            "hhea ascent/descent/gap : {ascender} / {descender} / {line_gap}\n"
+        ));
+    }
+
+    if let Some((ascender, descender, line_gap)) = m.os2_typo {
+        out.push_str(&format!(
+            "OS/2 typo asc/desc/gap  : {ascender} / {descender} / {line_gap}\n"
+        ));
+    }
+
+    if let Some((ascent, descent)) = m.os2_win {
+        out.push_str(&format!("OS/2 win ascent/descent : {ascent} / {descent}\n"));
+    }
+
+    if let Some((cap_height, x_height)) = m.cap_x_height {
+        out.push_str(&format!("x-height / cap-height   : {x_height} / {cap_height}\n"));
+    }
+
+    if let Some(italic_angle) = m.italic_angle {
         out.push_str(&format!("italic angle     : {italic_angle:.2} degrees\n"));
     }
 
-    let _ = units_per_em; // reserved for the em-to-pixel conversion planned next
-    Ok(out)
+    out
+}
+
+fn render_json(m: &Metrics) -> String {
+    let hhea = match m.hhea {
+        Some((a, d, g)) => format!("{{\"ascent\":{a},\"descent\":{d},\"line_gap\":{g}}}"),
+        None => "null".to_string(),
+    };
+    let os2_typo = match m.os2_typo {
+        Some((a, d, g)) => format!("{{\"ascent\":{a},\"descent\":{d},\"line_gap\":{g}}}"),
+        None => "null".to_string(),
+    };
+    let os2_win = match m.os2_win {
+        Some((a, d)) => format!("{{\"ascent\":{a},\"descent\":{d}}}"),
+        None => "null".to_string(),
+    };
+    let (cap_height, x_height) = match m.cap_x_height {
+        Some((c, x)) => (c.to_string(), x.to_string()),
+        None => ("null".to_string(), "null".to_string()),
+    };
+    let italic_angle = match m.italic_angle {
+        Some(a) => format!("{a:.2}"),
+        None => "null".to_string(),
+    };
+
+    format!(
+        "{{\"units_per_em\":{},\"hhea\":{hhea},\"os2_typo\":{os2_typo},\"os2_win\":{os2_win},\"cap_height\":{cap_height},\"x_height\":{x_height},\"italic_angle\":{italic_angle}}}",
+        m.units_per_em,
+    )
 }
 
 fn read_table_directory(data: &[u8]) -> Result<Vec<Table>, String> {
