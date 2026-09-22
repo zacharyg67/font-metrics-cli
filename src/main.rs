@@ -35,16 +35,36 @@ fn main() {
     }
 
     let mut json = false;
+    let mut font_index: usize = 0;
     let mut path: Option<&str> = None;
-    for a in &args {
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
         if a == "--json" {
             json = true;
+        } else if a == "--font-index" {
+            i += 1;
+            let val = match args.get(i) {
+                Some(v) => v,
+                None => {
+                    print_usage();
+                    process::exit(2);
+                }
+            };
+            font_index = match val.parse() {
+                Ok(n) => n,
+                Err(_) => {
+                    eprintln!("fontmetrics: invalid --font-index value: {val}");
+                    process::exit(2);
+                }
+            };
         } else if path.is_none() {
             path = Some(a);
         } else {
             print_usage();
             process::exit(2);
         }
+        i += 1;
     }
 
     let data = match path {
@@ -60,7 +80,7 @@ fn main() {
         }
     };
 
-    match report(&data) {
+    match report(&data, font_index) {
         Ok(metrics) => {
             if json {
                 println!("{}", render_json(&metrics));
@@ -76,11 +96,13 @@ fn main() {
 }
 
 fn print_usage() {
-    eprintln!("usage: fontmetrics [--json] [FILE]");
+    eprintln!("usage: fontmetrics [--json] [--font-index N] [FILE]");
     eprintln!();
     eprintln!("Print font metrics from a TrueType or OpenType file.");
     eprintln!("With no FILE, or FILE is -, read from standard input.");
     eprintln!("With --json, print the metrics as a single JSON object.");
+    eprintln!("With --font-index N, select font N from a .ttc collection");
+    eprintln!("(default 0). Ignored for non-collection files.");
 }
 
 fn read_stdin() -> Result<Vec<u8>, String> {
@@ -91,14 +113,24 @@ fn read_stdin() -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
-fn report(data: &[u8]) -> Result<Metrics, String> {
+fn report(data: &[u8], font_index: usize) -> Result<Metrics, String> {
     let tag = u32_at(data, 0)?;
-    if tag == 0x74746366 {
-        // 'ttcf'
-        return Err("TrueType collections (.ttc) are not supported yet".to_string());
-    }
+    let table_base = if tag == 0x74746366 {
+        // 'ttcf': a collection file wraps several sfnt table directories,
+        // each addressed by an absolute file offset in the header's
+        // offset table, rather than containing a single one at byte 0.
+        let num_fonts = u32_at(data, 8)? as usize;
+        if font_index >= num_fonts {
+            return Err(format!(
+                "font index {font_index} out of range: collection has {num_fonts} font(s)"
+            ));
+        }
+        u32_at(data, 12 + font_index * 4)? as usize
+    } else {
+        0
+    };
 
-    let tables = read_table_directory(data)?;
+    let tables = read_table_directory(data, table_base)?;
     let mut metrics = Metrics::default();
 
     metrics.units_per_em = if let Some(head) = find(&tables, b"head") {
@@ -200,11 +232,11 @@ fn render_json(m: &Metrics) -> String {
     )
 }
 
-fn read_table_directory(data: &[u8]) -> Result<Vec<Table>, String> {
-    let num_tables = u16_at(data, 4)? as usize;
+fn read_table_directory(data: &[u8], base: usize) -> Result<Vec<Table>, String> {
+    let num_tables = u16_at(data, base + 4)? as usize;
     let mut tables = Vec::with_capacity(num_tables);
     for i in 0..num_tables {
-        let record_off = 12 + i * 16;
+        let record_off = base + 12 + i * 16;
         let mut tag = [0u8; 4];
         tag.copy_from_slice(bytes_at(data, record_off, 4)?);
         let offset = u32_at(data, record_off + 8)?;

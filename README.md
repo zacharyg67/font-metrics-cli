@@ -56,6 +56,14 @@ $ fontmetrics --json Georgia.ttf
 Fields the font doesn't provide come back as `null` rather than being
 omitted, so the shape is the same for every font.
 
+For a TrueType collection (`.ttc`), the tool reports on one font from the
+collection at a time. It picks font 0 by default; use `--font-index` to
+pick another:
+
+```
+$ fontmetrics --font-index 1 NotoSansCJK.ttc
+```
+
 ## Building
 
 Standard library only, no dependencies:
@@ -68,5 +76,4 @@ cargo build --release
 
 This reads the table directory and the `head`, `hhea`, `OS/2`, and `post`
 tables directly; it does not parse glyph outlines, so it works the same on
-TrueType-outline and CFF-outline (OpenType/CFF) fonts. TrueType collection
-files (`.ttc`) are not supported yet.
+TrueType-outline and CFF-outline (OpenType/CFF) fonts.
